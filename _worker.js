@@ -114,7 +114,7 @@ function countryCodeToIATA(code) {
     "JP": "NRT", // 日本
     "KR": "ICN", // 韩国
     "SG": "SIN", // 新加坡
-    "US": "LAX", // 美国
+    "US": "USA", // 美国
     "GB": "LHR", // 英国
     "DE": "FRA", // 德国
     "FR": "CDG", // 法国
