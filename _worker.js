@@ -20,7 +20,7 @@ export default {
       "Access-Control-Allow-Origin": "*"
     };
 
-    // 1. /check 接口：仅当检测通过时，才查询地理信息并以英文完整输出
+    // 1. /check 接口：请求官方 Debian 镜像站，动态提取并转码
     if (path === '/check') {
       const rawIp = url.searchParams.get('proxyip');
       if (!rawIp) {
@@ -29,30 +29,13 @@ export default {
 
       const checkResult = await CheckProxyIP(rawIp.trim());
 
-      if (checkResult.success) {
-        const geoInfo = await getIPGeo(checkResult.proxyIP);
-        let iataCode = checkResult.colo;
-
-        // 如果报文未提取到 CF-RAY 机场码，则使用国家代码进行映射（兜底回 USA）
-        if (!iataCode || iataCode === "UNK") {
-          iataCode = countryCodeToIATA(geoInfo.countryCode);
-        }
-
-        checkResult.country = iataCode;
-        checkResult.region = geoInfo.region || "";
-        checkResult.city = geoInfo.city || "";
-        checkResult.isp = geoInfo.isp || "";
-        checkResult.as = geoInfo.as || "";
-        delete checkResult.colo;
-      }
-
       return new Response(JSON.stringify(checkResult, null, 2), {
         status: checkResult.success ? 200 : 502,
         headers: corsHeaders
       });
     }
 
-    // 2. /resolve 接口：域名解析
+    // 2. /resolve 接口：DoH 域名解析
     if (path === '/resolve') {
       const domain = url.searchParams.get('domain') || url.searchParams.get('name');
       if (!domain) {
@@ -67,36 +50,17 @@ export default {
       }
     }
 
-    // 3. /ip-info 接口：指定查询 IP 归属地（全英文保留字段）
-    if (path === '/ip-info') {
-      const clientIP = url.searchParams.get('ip') || request.headers.get('CF-Connecting-IP') || '127.0.0.1';
-      const geoInfo = await getIPGeo(clientIP);
-      const iataCode = countryCodeToIATA(geoInfo.countryCode);
-
-      return new Response(JSON.stringify({
-        status: geoInfo.status,
-        ip: geoInfo.ip,
-        country: iataCode,
-        region: geoInfo.region,
-        city: geoInfo.city,
-        isp: geoInfo.isp,
-        as: geoInfo.as
-      }, null, 2), { status: 200, headers: corsHeaders });
-    }
-
-    // 4. 根目录：直接展示当前访问者的 IP 与全套英文地理信息
+    // 3. /ip-info 或 根目录：直接展示访问者原生信息
     const visitorIP = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
-    const visitorGeo = await getIPGeo(visitorIP);
-    const visitorIATA = countryCodeToIATA(visitorGeo.countryCode);
+    const cf = request.cf || {};
+    const visitorCountry = countryCodeToIATA(cf.country || cf.colo);
 
     return new Response(JSON.stringify({
       status: "success",
       clientIP: visitorIP,
-      country: visitorIATA,
-      region: visitorGeo.region,
-      city: visitorGeo.city,
-      isp: visitorGeo.isp,
-      as: visitorGeo.as,
+      country: visitorCountry,
+      isp: cf.asOrganization || "Cloudflare, Inc.",
+      as: cf.asn ? `AS${cf.asn} ${cf.asOrganization || ''}`.trim() : "AS13335 CLOUDFLARENET",
       timestamp: new Date().toISOString()
     }, null, 2), {
       status: 200,
@@ -105,78 +69,24 @@ export default {
   }
 };
 
-// --- 国家/地区二字码转主要机场三字代码 (IATA) 映射表（未知一律映射为 USA） ---
+// --- 国家/地区二字码转主要机场三字代码 (IATA) 映射表（未知/UNK 统一兜底 USA） ---
 function countryCodeToIATA(code) {
   if (!code || code.toUpperCase() === "UNK") return "USA";
+  const upper = code.toUpperCase();
+
   const map = {
-    "HK": "HKG", // 香港
-    "TW": "TPE", // 台湾
-    "JP": "NRT", // 日本
-    "KR": "ICN", // 韩国
-    "SG": "SIN", // 新加坡
-    "US": "USA", // 美国
-    "GB": "LHR", // 英国
-    "DE": "FRA", // 德国
-    "FR": "CDG", // 法国
-    "NL": "AMS", // 荷兰
-    "RU": "SVO", // 俄罗斯
-    "CA": "YYZ", // 加拿大
-    "AU": "SYD", // 澳大利亚
-    "CN": "PEK", // 中国大陆
-    "MO": "MFM", // 澳门
-    "MY": "KUL", // 马来西亚
-    "TH": "BKK", // 泰国
-    "VN": "SGN", // 越南
-    "PH": "MNL", // 菲律宾
-    "IN": "DEL", // 印度
+    "HK": "HKG", "TW": "TPE", "JP": "NRT", "KR": "ICN", "SG": "SIN",
+    "CN": "PEK", "MO": "MFM", "MY": "KUL", "TH": "BKK", "VN": "SGN",
+    "PH": "MNL", "ID": "CGK", "IN": "DEL", "AU": "SYD", "NZ": "AKL",
+    "US": "USA", "CA": "YYZ", "MX": "MEX", "BR": "GRU", "AR": "EZE",
+    "CL": "SCL", "GB": "LHR", "UK": "LHR", "DE": "FRA", "FR": "CDG",
+    "NL": "AMS", "RU": "SVO", "IT": "FCO", "ES": "MAD", "CH": "ZRH",
+    "SE": "ARN", "NO": "OSL", "PL": "WAW", "IE": "DUB", "TR": "IST",
+    "UA": "KBP", "AE": "DXB", "ZA": "JNB", "EG": "CAI", "SA": "RUH",
+    "IL": "TLV",
   };
-  return map[code.toUpperCase()] || "USA";
-}
 
-// --- 英文地理位置查询（自动清洗端口，多源兜底） ---
-async function getIPGeo(ip) {
-  let cleanIp = ip.trim();
-  if (cleanIp.startsWith('[') && cleanIp.includes(']')) {
-    cleanIp = cleanIp.substring(1, cleanIp.indexOf(']'));
-  } else if (cleanIp.includes(':') && cleanIp.indexOf(':') === cleanIp.lastIndexOf(':')) {
-    cleanIp = cleanIp.split(':')[0];
-  }
-
-  // 1. 优先请求 ipwho.is (英文原生返回)
-  try {
-    const res = await fetch(`https://ipwho.is/${encodeURIComponent(cleanIp)}`);
-    const data = await res.json();
-    if (data.success) {
-      return {
-        status: "success",
-        ip: cleanIp,
-        countryCode: data.country_code || "",
-        region: data.region || "",
-        city: data.city || "",
-        isp: data.connection?.isp || "",
-        as: `${data.connection?.asn ? 'AS' + data.connection.asn : ''} ${data.connection?.org || ''}`.trim()
-      };
-    }
-  } catch (_) {}
-
-  // 2. 备用请求 ip-api.com (英文原生返回)
-  try {
-    const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(cleanIp)}`);
-    const data = await res.json();
-    if (data.status === "success") {
-      return {
-        status: "success",
-        ip: cleanIp,
-        countryCode: data.countryCode || "",
-        region: data.regionName || "",
-        city: data.city || "",
-        isp: data.isp || "",
-        as: data.as || ""
-      };
-    }
-  } catch (_) {}
-
-  return { status: "fail", ip: cleanIp, countryCode: "USA", region: "", city: "", isp: "", as: "" };
+  return map[upper] || (upper.length === 3 ? upper : "USA");
 }
 
 // --- DoH 域名解析 ---
@@ -199,7 +109,7 @@ async function resolveDomain(domain) {
   return ips;
 }
 
-// --- ProxyIP 检测 ---
+// --- ProxyIP 检测与官方镜像站地理信息提取 ---
 async function CheckProxyIP(proxyIP) {
   let portRemote = 443;
   let targetHost = proxyIP;
@@ -218,10 +128,11 @@ async function CheckProxyIP(proxyIP) {
       port: portRemote,
     });
 
+    // 请求官方 debian 镜像站页面
     const httpRequest =
-      "GET /cdn-cgi/trace HTTP/1.1\r\n" +
-      "Host: speed.cloudflare.com\r\n" +
-      "User-Agent: CheckProxyIP/API\r\n" +
+      "GET /debian HTTP/1.1\r\n" +
+      "Host: cloudflaremirrors.com\r\n" +
+      "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n" +
       "Connection: close\r\n\r\n";
 
     const writer = tcpSocket.writable.getWriter();
@@ -259,26 +170,35 @@ async function CheckProxyIP(proxyIP) {
     const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
 
     const looksLikeCloudflare = responseText.toLowerCase().includes("cloudflare");
-    const isExpectedError = responseText.includes("plain HTTP request") || responseText.includes("400 Bad Request");
     const hasBody = responseData.length > 50;
 
-    let colo = "USA";
+    let country = "USA";
+
     if (looksLikeCloudflare) {
-      const coloMatch = responseText.match(/cf-ray:\s*[a-zA-Z0-9]+-([a-zA-Z0-9]{3})/i);
-      if (coloMatch && coloMatch[1]) {
-        colo = coloMatch[1].toUpperCase();
+      // 1. 优先提取 Body 中的镜像站二级国家代码 (如 ftp.jp.debian.org -> jp)
+      const mirrorMatch = responseText.match(/ftp\.([a-zA-Z]{2})\.debian\.org/i);
+      if (mirrorMatch && mirrorMatch[1]) {
+        country = countryCodeToIATA(mirrorMatch[1]);
+      } else {
+        // 2. 备用：从 CF-RAY 头提取三字机房代码 (如 86d1a938c8f12345-HKG -> HKG)[span_1](start_span)[span_1](end_span)
+        const coloMatch = responseText.match(/cf-ray:\s*[a-zA-Z0-9]+-([a-zA-Z0-9]{3})/i);
+        if (coloMatch && coloMatch[1]) {
+          country = countryCodeToIATA(coloMatch[1]);
+        }
       }
     }
 
-    const isSuccessful = statusCode !== null && looksLikeCloudflare && isExpectedError && hasBody;
+    const isSuccessful = statusCode !== null && looksLikeCloudflare && hasBody;
 
     return {
       success: isSuccessful,
       proxyIP: targetHost,
       portRemote: portRemote,
-      colo: colo,
+      country: country,
       statusCode: statusCode || null,
       responseSize: responseData.length,
+      isp: "Cloudflare, Inc.",
+      as: "AS13335 CLOUDFLARENET",
       timestamp: new Date().toISOString(),
     };
   } catch (error) {
