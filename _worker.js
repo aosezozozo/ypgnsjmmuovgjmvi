@@ -33,7 +33,7 @@ export default {
         const geoInfo = await getIPGeo(checkResult.proxyIP);
         let iataCode = checkResult.colo;
 
-        // 如果报文未提取到 CF-RAY 机场码，则使用国家代码进行映射
+        // 如果报文未提取到 CF-RAY 机场码，则使用国家代码进行映射（兜底回 USA）
         if (!iataCode || iataCode === "UNK") {
           iataCode = countryCodeToIATA(geoInfo.countryCode);
         }
@@ -105,9 +105,9 @@ export default {
   }
 };
 
-// --- 国家/地区二字码转主要机场三字代码 (IATA) 映射表 ---
+// --- 国家/地区二字码转主要机场三字代码 (IATA) 映射表（未知一律映射为 USA） ---
 function countryCodeToIATA(code) {
-  if (!code) return "UNK";
+  if (!code || code.toUpperCase() === "UNK") return "USA";
   const map = {
     "HK": "HKG", // 香港
     "TW": "TPE", // 台湾
@@ -130,7 +130,7 @@ function countryCodeToIATA(code) {
     "PH": "MNL", // 菲律宾
     "IN": "DEL", // 印度
   };
-  return map[code.toUpperCase()] || code.toUpperCase();
+  return map[code.toUpperCase()] || "USA";
 }
 
 // --- 英文地理位置查询（自动清洗端口，多源兜底） ---
@@ -176,7 +176,7 @@ async function getIPGeo(ip) {
     }
   } catch (_) {}
 
-  return { status: "fail", ip: cleanIp, countryCode: "UNK", region: "", city: "", isp: "", as: "" };
+  return { status: "fail", ip: cleanIp, countryCode: "USA", region: "", city: "", isp: "", as: "" };
 }
 
 // --- DoH 域名解析 ---
@@ -262,7 +262,7 @@ async function CheckProxyIP(proxyIP) {
     const isExpectedError = responseText.includes("plain HTTP request") || responseText.includes("400 Bad Request");
     const hasBody = responseData.length > 50;
 
-    let colo = "UNK";
+    let colo = "USA";
     if (looksLikeCloudflare) {
       const coloMatch = responseText.match(/cf-ray:\s*[a-zA-Z0-9]+-([a-zA-Z0-9]{3})/i);
       if (coloMatch && coloMatch[1]) {
