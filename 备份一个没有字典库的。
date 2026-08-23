@@ -1,0 +1,160 @@
+import { connect } from "cloudflare:sockets";
+
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Max-Age": "86400",
+        }
+      });
+    }
+
+    const url = new URL(request.url);
+    const path = url.pathname.toLowerCase();
+    const corsHeaders = {
+      "Content-Type": "application/json; charset=UTF-8",
+      "Access-Control-Allow-Origin": "*"
+    };
+
+    if (path === '/check') {
+      const rawIp = url.searchParams.get('proxyip');
+      if (!rawIp) {
+        return new Response(JSON.stringify({ success: false, error: '缺少 proxyip 参数' }), { 
+          status: 400, 
+          headers: corsHeaders 
+        });
+      }
+
+      const checkResult = await CheckProxyIP(rawIp.trim());
+
+      return new Response(JSON.stringify(checkResult, null, 2), {
+        status: checkResult.success ? 200 : 502,
+        headers: corsHeaders
+      });
+    }
+
+    // 访客原生信息
+    const visitorIP = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
+    const cf = request.cf || {};
+
+    return new Response(JSON.stringify({
+      status: "success",
+      clientIP: visitorIP,
+      dataCenter: cf.colo || "UNK",
+      country: cf.country || "UNK",
+      isp: cf.asOrganization || "Cloudflare, Inc.",
+      as: cf.asn ? `AS${cf.asn} ${cf.asOrganization || ''}`.trim() : "AS13335 CLOUDFLARENET",
+      timestamp: new Date().toISOString()
+    }, null, 2), {
+      status: 200,
+      headers: corsHeaders
+    });
+  }
+};
+
+async function CheckProxyIP(proxyIP) {
+  let targetHost = proxyIP;
+  let rawPort = 443;
+
+  if (proxyIP.includes('[') && proxyIP.includes(']:')) {
+    rawPort = parseInt(proxyIP.split(']:')[1]);
+    targetHost = proxyIP.split(']:')[0] + ']';
+  } else if (proxyIP.includes(':') && proxyIP.indexOf(':') === proxyIP.lastIndexOf(':')) {
+    rawPort = parseInt(proxyIP.split(':')[1]);
+    targetHost = proxyIP.split(':')[0];
+  }
+
+  const startTime = Date.now();
+
+  try {
+    const tcpSocket = connect({
+      hostname: targetHost,
+      port: 80
+    });
+
+    const httpRequest =
+      "GET /cdn-cgi/trace HTTP/1.1\r\n" +
+      "Host: cp.cloudflare.com\r\n" +
+      "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n" +
+      "Accept: text/plain\r\n" +
+      "Connection: close\r\n\r\n";
+
+    const writer = tcpSocket.writable.getWriter();
+    await writer.write(new TextEncoder().encode(httpRequest));
+    writer.releaseLock();
+
+    const reader = tcpSocket.readable.getReader();
+    let responseText = "";
+
+    try {
+      while (true) {
+        const { value, done } = await Promise.race([
+          reader.read(),
+          new Promise(resolve => setTimeout(() => resolve({ done: true }), 2500))
+        ]);
+
+        if (done) break;
+        if (value) {
+          responseText += new TextDecoder().decode(value, { stream: true });
+          if (responseText.includes("colo=") && responseText.includes("loc=")) {
+            break;
+          }
+        }
+      }
+    } finally {
+      try { reader.releaseLock(); } catch (_) {}
+      try { await tcpSocket.close(); } catch (_) {}
+    }
+
+    const tcpDuration = Date.now() - startTime;
+
+    // 状态码
+    const statusMatch = responseText.match(/^HTTP\/\d\.\d\s+(\d+)/i);
+    const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
+
+    // 纯提取官方 Trace 中的 colo 与 loc
+    let extractedColo = "UNK";
+    let extractedLoc = "UNK";
+
+    const coloMatch = responseText.match(/colo=([a-zA-Z0-9]+)/i);
+    if (coloMatch && coloMatch[1]) {
+      extractedColo = coloMatch[1].toUpperCase();
+    }
+
+    const locMatch = responseText.match(/loc=([a-zA-Z0-9]+)/i);
+    if (locMatch && locMatch[1]) {
+      extractedLoc = locMatch[1].toUpperCase();
+    }
+
+    const isConnected = responseText.length > 0;
+
+    return {
+      success: isConnected,
+      proxyIP: targetHost,
+      portRemote: rawPort,
+      dataCenter: extractedColo,
+      country: extractedLoc,
+      latency: `${tcpDuration} ms`,
+      tcpDuration: tcpDuration,
+      statusCode: statusCode,
+      isp: "Cloudflare, Inc.",
+      as: "AS13335 CLOUDFLARENET",
+      timestamp: new Date().toISOString()
+    };
+  } catch (error) {
+    return {
+      success: false,
+      proxyIP: targetHost,
+      portRemote: rawPort,
+      dataCenter: "UNK",
+      country: "UNK",
+      latency: `${Date.now() - startTime} ms`,
+      timestamp: new Date().toISOString(),
+      error: error.message || error.toString()
+    };
+  }
+}
